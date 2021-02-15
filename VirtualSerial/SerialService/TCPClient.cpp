@@ -6,7 +6,7 @@
 int TCPClient::Connect()
 {
     const char* DEFAULT_PORT = "3000";
-    const char* SERVER_IP = "127.0.0.1";
+    const char* SERVER_IP = "10.0.2.2";
 
     WSADATA wsaData;
     struct addrinfo* result = NULL, * ptr = NULL, hints;
@@ -64,30 +64,59 @@ int TCPClient::Connect()
     }
 
     printf("[OK]\n");
+
+    ghWriteMutex = CreateMutex(
+        NULL,              // default security attributes
+        FALSE,             // initially not owned
+        NULL);             // unnamed mutex
+
+    ghReadMutex = CreateMutex(
+        NULL,              // default security attributes
+        FALSE,             // initially not owned
+        NULL);             // unnamed mutex
+
+    if (ghWriteMutex == NULL || ghReadMutex == NULL)
+    {
+        CloseHandle(ghWriteMutex);
+        CloseHandle(ghReadMutex);
+        printf("CreateMutex error: %d\n", GetLastError());
+        return 1;
+    }
+
     return 0;
 }
 
-int TCPClient::Write(const char* buffer, int bufferLen)
+int TCPClient::Write(const char* buffer, const int bufferLen)
 {
     int iResult;
     char msg[2*COMPortManager::PACKET_SIZE];
-    sprintf_s(msg, "DIRECTION:%d\nLEN:%d\nMSG:", (int)COMPortManager::DIRECTION::TX, bufferLen);
-    strncat_s(msg, buffer, COMPortManager::PACKET_SIZE);
+
     if (ClientConnectSocket == INVALID_SOCKET) {
         printf("Invalid client socket!\n");
         WSACleanup();
         return 1;
     }
-    // Send an initial buffer
-    iResult = send(ClientConnectSocket, msg, 2 * COMPortManager::PACKET_SIZE, 0);
-    if (iResult == SOCKET_ERROR) {
-        printf("send failed with error: %d\n", WSAGetLastError());
-        closesocket(ClientConnectSocket);
-        WSACleanup();
-        return 1;
-    }
-    printf("Bytes Sent: %ld\n", iResult);
 
+    WaitForSingleObject(
+        ghWriteMutex,    // handle to mutex
+        INFINITE);  // no time-out interval
+
+    if (bufferLen > 0) {
+        sprintf_s(msg, "DIRECTION:%d\nLEN:%d\nMSG:", (int)COMPortManager::DIRECTION::TX, bufferLen);
+        strncat_s(msg, buffer, COMPortManager::PACKET_SIZE-1);
+        // Send an initial buffer
+        iResult = send(ClientConnectSocket, msg, COMPortManager::PACKET_SIZE, 0);
+        if (iResult == SOCKET_ERROR) {
+            printf("TCPClient::Write send failed with error: %d\n", WSAGetLastError());
+            closesocket(ClientConnectSocket);
+            WSACleanup();
+            ReleaseMutex(ghWriteMutex);
+            return 1;
+        }
+        printf("TCPClient::Write(const char* buffer, int bufferLen) .... [%c] [%d]\n", buffer[0], bufferLen);
+    }
+
+    ReleaseMutex(ghWriteMutex);
     return 0;
 }
 
@@ -100,41 +129,53 @@ int TCPClient::Read(char* lpBuffer, int bufferLen)
         WSACleanup();
         return 1;
     }
+
+    WaitForSingleObject(
+        ghWriteMutex,    // handle to mutex
+        INFINITE);  // no time-out interval
+
     // Send an initial buffer
     char msg[2 * COMPortManager::PACKET_SIZE];
     sprintf_s(msg, "DIRECTION:%d\nLEN:%d\nMSG:", (int)COMPortManager::DIRECTION::RX, bufferLen);
     iResult = send(ClientConnectSocket, msg, 2 * COMPortManager::PACKET_SIZE, 0);
     if (iResult == SOCKET_ERROR) {
-        printf("send failed with error: %d\n", WSAGetLastError());
+        printf("TCPClient::Read send failed with error: %d\n", WSAGetLastError());
         closesocket(ClientConnectSocket);
         WSACleanup();
+        ReleaseMutex(ghWriteMutex);
         return 1;
     }
-    printf("Bytes Sent: %ld\n", iResult);
+    printf("TCPClient::Read(char* lpBuffer, int bufferLen) ....\n");
 
     // Receive until the peer closes the connection
-    do {
+    {
+        SecureZeroMemory(lpBuffer, COMPortManager::PACKET_SIZE);
         iResult = recv(ClientConnectSocket, lpBuffer, bufferLen, 0);
         if (iResult > 0) 
         {
-            COMPortManager::SerialMessage sm;
-            printf("Bytes received: %d\n", iResult);
+            printf("TCPClient::Read Bytes received: [%c]\n", lpBuffer[0]);
         }
         else if (iResult == 0)
         {
+            iResult = 0;
             printf("Connection closed\n");
         }
         else
         {
+            iResult = 0;
             printf("recv failed with error: %d\n", WSAGetLastError());
         }
 
-    } while (iResult > 0);
+    }
+
+    ReleaseMutex(ghWriteMutex);
     return iResult;
 }
 
 int TCPClient::Close() {
     int iResult;
+    CloseHandle(ghWriteMutex);
+    CloseHandle(ghReadMutex);
     printf("Closing client socket .... ");
     // shutdown the connection since no more data will be sent
     iResult = shutdown(ClientConnectSocket, SD_SEND);

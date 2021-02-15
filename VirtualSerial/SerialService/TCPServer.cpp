@@ -114,18 +114,31 @@ void TCPServer::Wait()
 COMPortManager::SerialMessage TCPServer::ParseMSG(const char* recvbuf, int buffLen)
 {
     COMPortManager::SerialMessage sm;
+    SecureZeroMemory(sm.msg, COMPortManager::PACKET_SIZE);
+
     int dir = 0;
-    printf("Parsing msg ....\n");
-    sscanf_s(recvbuf, "DIRECTION:%d\nLEN:%d\nMSG:%s", &dir, &sm.len, sm.msg);
-    if (dir == (int)COMPortManager::DIRECTION::TX)
-    {
-        sm.d = COMPortManager::DIRECTION::TX;
+    const int ret = sscanf_s(recvbuf, "DIRECTION:%d\nLEN:%d\nMSG:", &dir, &sm.len);
+    if (ret > 1) {
+        if (dir == (int)COMPortManager::DIRECTION::TX)
+        {
+            sm.d = COMPortManager::DIRECTION::TX;
+            const char* idx = strstr(recvbuf, "MSG:");
+            if (idx != NULL) {
+                printf("memcpy ...");
+                memcpy(sm.msg, idx+4, sm.len);
+                printf("[OK]\n");
+            }
+        }
+        else
+        {
+            sm.d = COMPortManager::DIRECTION::RX;
+        }
+        //printf("Parsing result .... dir: %d len: %d\n", (int)sm.d, sm.len);
     }
-    else
-    {
-        sm.d = COMPortManager::DIRECTION::RX;
+    else {
+        sm.len = 0;
+        sm.d = COMPortManager::DIRECTION::NONE;
     }
-    printf("Parsing result .... dir: %d len: %d\n", (int)sm.d, sm.len);
     return sm;
 }
 
@@ -133,7 +146,7 @@ DWORD WINAPI TCPServer::HandleClient(LPVOID lpParam)
 {
     int iResult;
     int iSendResult;
-    int recvbuflen = 2*COMPortManager::PACKET_SIZE;
+    const int recvbuflen = 2*COMPortManager::PACKET_SIZE;
     char recvbuf[2*COMPortManager::PACKET_SIZE];
     SOCKET ClientSocket = INVALID_SOCKET;
 
@@ -151,6 +164,7 @@ DWORD WINAPI TCPServer::HandleClient(LPVOID lpParam)
         // Receive until the peer shuts down the connection
         do 
         {
+            SecureZeroMemory(recvbuf, recvbuflen);
             iResult = recv(ClientSocket, recvbuf, recvbuflen, 0);
             if (iResult > 0) 
             {
@@ -159,14 +173,12 @@ DWORD WINAPI TCPServer::HandleClient(LPVOID lpParam)
 
                 if (sm.d == COMPortManager::DIRECTION::RX) 
                 {
-                    printf("Handling request to read: %d\n", iResult);
+                    printf("Handling request to READ: %d\n", sm.len);
                     // Read requested number of bytes from real COM port
+                    SecureZeroMemory(sm.msg, COMPortManager::PACKET_SIZE);
                     cpm->ReadRealCOM(sm.msg, sm.len);
                     // Send back to client
-                    
-                    sprintf_s(recvbuf, "DIRECTION:%d\nLEN:%d\nMSG:", (int)COMPortManager::DIRECTION::TX, sm.len);
-                    strncat_s(recvbuf, sm.msg, COMPortManager::PACKET_SIZE);
-                    iSendResult = send(ClientSocket, recvbuf, recvbuflen, 0);
+                    iSendResult = send(ClientSocket, sm.msg, sm.len, 0);
                     if (iSendResult == SOCKET_ERROR) 
                     {
                         printf("send failed with error: %d\n", WSAGetLastError());
@@ -174,11 +186,14 @@ DWORD WINAPI TCPServer::HandleClient(LPVOID lpParam)
                         WSACleanup();
                         return 1;
                     }
-                    printf("Bytes sent: %d\n", iSendResult);
+                    printf("TCPServer::HandleClient(LPVOID lpParam) Bytes sent: %d\n", iSendResult);
                 }
                 else if (sm.d == COMPortManager::DIRECTION::TX) 
                 {
-                    cpm->WriteRealCOM(sm.msg, sm.len);
+                    printf("Handling request to WRITE: %d [%c]\n", sm.len, sm.msg[0]);
+                    if (sm.len > 0) {
+                        cpm->WriteRealCOM(sm.msg, sm.len);
+                    }
                 }
 
             }
@@ -199,7 +214,7 @@ DWORD WINAPI TCPServer::HandleClient(LPVOID lpParam)
 
     // No longer need server socket
     closesocket(ListenSocket);
-
+    printf("TCPServer::HandleClient closesocket ...\n");
     // shutdown the connection since we're done
     iResult = shutdown(ClientSocket, SD_SEND);
     if (iResult == SOCKET_ERROR) {

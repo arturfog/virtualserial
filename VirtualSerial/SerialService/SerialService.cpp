@@ -3,7 +3,7 @@
 #include <Windows.h>
 #include <tchar.h>
 #include <signal.h>  
-
+#include <chrono>
 #include "COMPortManager.h"
 #include "TCPClient.h"
 #include "TCPServer.h"
@@ -21,12 +21,7 @@ TCPServer server(&cpm);
 int waitForMsg()
 {
     LPCTSTR lpszPipename;
-    if (SERVER_MODE == TRUE) {
-        lpszPipename = TEXT("\\\\.\\pipe\\virtualserialpipe2");
-    }
-    else {
-        lpszPipename = TEXT("\\\\.\\pipe\\virtualserialpipe3");
-    }
+    lpszPipename = TEXT("\\\\.\\pipe\\virtualserialpipe2");
     HANDLE hPipe = INVALID_HANDLE_VALUE;
 
     printf("Waiting for mesasges from virtual driver ....\n");
@@ -78,8 +73,16 @@ int waitForMsg()
 
     COMPortManager::SerialMessage smRet;
     COMPortManager::SerialMessage smOut;
+    SecureZeroMemory(smRet.msg, COMPortManager::PACKET_SIZE);
+    SecureZeroMemory(smOut.msg, COMPortManager::PACKET_SIZE);
+
+    char xyz[128];
+    ZeroMemory(xyz, 128);
+    int bufferFill = 0;
+    int bufferIdx = 0;
 
     int bytesRead = 0;
+
     do
     {
         // Read from the pipe. 
@@ -91,41 +94,62 @@ int waitForMsg()
             NULL);    // not overlapped 
 
         if (!fSuccess && GetLastError() != ERROR_MORE_DATA)
+        {
             break;
+        }
 
         if (smRet.d == COMPortManager::DIRECTION::TX) {
             if (SERVER_MODE) {
                 // Forward data from virtual port to real port
-                if (smRet.len > 1) {
-                    printf("Writting: %d bytes \"%c\"\n", smRet.len, smRet.msg[0]);
-                }
                 cpm.WriteRealCOM(smRet.msg, smRet.len);
             }
             else 
             {
                 // Forward data from virtual port by TCP to server
-                client.Write(smRet.msg, smRet.len);
+                int ret = client.Write(smRet.msg, smRet.len);
+                if (ret == 1)
+                {
+                    _tprintf(TEXT("client.Write(smRet.msg, smRet.len) failed.\n"));
+                    CloseHandle(hPipe);
+                    return -1;
+                }
             }
         }
         else if (smRet.d == COMPortManager::DIRECTION::RX) {
             int len = (smRet.len < COMPortManager::PACKET_SIZE ? smRet.len : COMPortManager::PACKET_SIZE);
-            //printf("Request Reading: %d bytes\n", len);
+            
+            smOut.d = COMPortManager::DIRECTION::NONE;
+            smOut.len = 1;
+
             if (SERVER_MODE) {
                 bytesRead = cpm.ReadRealCOM(smOut.msg, len);
                 smOut.len = bytesRead;
-                smOut.d = COMPortManager::DIRECTION::NONE;
-                if (smOut.len > 1) {
-                    printf("Reading: %d bytes\n", smOut.len);
-                }
-                fflush(stdout);
             }
             else 
             {
-                // Read data by TCP from server
-                bytesRead = client.Read(smOut.msg, len);
-                smOut.len = bytesRead;
-                smOut.d = COMPortManager::DIRECTION::NONE;
+                if(bufferFill == 0) {
+                    bytesRead = client.Read(xyz, 32);
+                    bufferFill = bytesRead - len;
+                    bufferIdx += len;
+                    memcpy(smOut.msg, xyz, len);
+                    printf("Timeout: %lu [%s]\n", bytesRead, xyz);
+                }
+                else {
+                    if (bufferFill >= len) {
+                        memcpy(smOut.msg, xyz + bufferIdx, len);
+                        bufferIdx += len;
+                        bufferFill -= len;
+                        if (bufferIdx >= 32) { bufferIdx = 0; }
+                    }
+                    else {
+                        bytesRead = client.Read(xyz, 32);
+                        bufferFill = bytesRead - len;
+                        bufferIdx += len;
+                        memcpy(smOut.msg, xyz, len);
+                    }
+                }
             }
+            //
             // Write data to virtual driver, so app can read it
             fSuccess = WriteFile(
                 hPipe,                  // pipe handle 
@@ -136,15 +160,18 @@ int waitForMsg()
 
             if (!fSuccess)
             {
+                CloseHandle(hPipe);
                 _tprintf(TEXT("WriteFile to pipe failed. GLE=%d\n"), GetLastError());
                 return -1;
             }
+            
         }
     } while (1);  // repeat loop if ERROR_MORE_DATA 
 
     if (!fSuccess)
     {
-        _tprintf(TEXT("ReadFile from pipe failed. GLE=%d\n"), GetLastError());
+        CloseHandle(hPipe);
+        _tprintf(TEXT("XXX ReadFile from pipe failed. GLE=%d\n"), GetLastError());
         return -1;
     }
 

@@ -50,7 +50,7 @@ VOID CMyQueue::openPipes()
     sa.nLength = sizeof(SECURITY_ATTRIBUTES);
     sa.bInheritHandle = FALSE;
     wchar_t temp[300];
-    swprintf(temp, 300, L"\\\\.\\pipe\\%s", L"virtualserialpipe3");
+    swprintf(temp, 300, L"\\\\.\\pipe\\%s", L"virtualserialpipe2");
 
     _pipe = CreateNamedPipe(
         temp,             // pipe name 
@@ -1076,6 +1076,7 @@ Return Value:
     // Write the reply to the pipe. 
     if (_pipe != INVALID_HANDLE_VALUE && fConnected)
     {
+        ZeroMemory(smOut.msg, 512);
         smInput.d = DIRECTION::RX;
         smInput.len = (int)SizeInBytes;
         DWORD cbWritten = 0;
@@ -1098,13 +1099,10 @@ Return Value:
                 NULL);        // not overlapped I/O
             if (fSuccess)
             {
-                BytesCopied = smOut.len;
                 if (smOut.d == DIRECTION::NONE) {
-                    if (outmem) {
-                        if (BytesCopied > 0)
-                        {
-                            CopyMemory(outmem, smOut.msg, BytesCopied);
-                        }
+                    BytesCopied = smOut.len;
+                    if (outmem != NULL) {
+                        CopyMemory(outmem, smOut.msg, BytesCopied);
                     }
                 }
             }
